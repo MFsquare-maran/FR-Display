@@ -7,10 +7,10 @@
 <style>
   :root{ --bg:#000; --line:#2a2a2a; --text:#fff; --dim:#8a8a8a; --accent:#f5b932; }
   *{box-sizing:border-box;margin:0}
-  html,body{height:100%;background:var(--bg);color:var(--text);
+  html,body{height:100%;-webkit-text-size-adjust:100%;touch-action:manipulation;background:var(--bg);color:var(--text);
     font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;overflow:hidden}
   body.kiosk{cursor:none}
-  #app{display:grid;grid-template-rows:48px 1fr;height:100vh}
+  #app{display:grid;grid-template-rows:48px 1fr;height:100vh;height:100dvh}
   header{display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--line)}
   .apt{font-size:20px;font-weight:600;letter-spacing:.04em;white-space:nowrap}
   .apt small{color:var(--dim);font-weight:400;font-size:13px;margin-left:10px;letter-spacing:.1em}
@@ -20,13 +20,20 @@
   #icao:focus{border-color:#fff}
   #icao.err{border-style:dashed;border-color:#fff}
   #icao.busy{opacity:.5}
-  #apt-msg{font-size:12px;color:var(--text);white-space:nowrap}
-  .src{font-size:11px;letter-spacing:.14em;padding:3px 8px;border:1px solid var(--dim);color:var(--dim);border-radius:3px}
+  #apt-msg{font-size:12px;color:var(--text);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .src{white-space:nowrap;font-size:11px;letter-spacing:.14em;padding:3px 8px;border:1px solid var(--dim);color:var(--dim);border-radius:3px}
   .src.ok{border-color:#fff;color:#fff}
-  #clock{font-variant-numeric:tabular-nums;font-size:20px;font-weight:300}
+  #clock{white-space:nowrap;font-variant-numeric:tabular-nums;font-size:20px;font-weight:300}
   #radar{position:relative;min-height:0}
   canvas{position:absolute;inset:0;width:100%;height:100%}
-  @media (max-width:560px){ .apt small{display:none} }
+  @media (max-width:600px){
+    header{gap:8px;padding:0 10px}
+    .apt{font-size:16px;overflow:hidden;text-overflow:ellipsis;min-width:0}.apt small{display:none}
+    #icao{width:62px;font-size:12px;padding:6px 4px}
+    .src{font-size:10px;padding:2px 6px;letter-spacing:.1em}.src .sn{display:none}
+    #clock{font-size:15px}
+    #apt-msg{display:none}
+  }
 </style>
 </head>
 <body>
@@ -300,7 +307,7 @@ function resize(){
   const r=cv.getBoundingClientRect();W=r.width;H=r.height;
   cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);
   cx=W/2;cy=H/2;
-  pxkm=Math.max(.5,(Math.min(W,H)/2-18)/R);
+  pxkm=Math.max(.5,(Math.min(W,H)/2-(W<600?10:18))/R);
   CONFIG.fetchNm=Math.max(6,Math.min(60,Math.ceil(Math.hypot(W,H)/2/pxkm/1.852)+2));   // reicht bis in die Bildschirmecken
   stat=null;
 }
@@ -539,7 +546,10 @@ function tickClock(){$('clock').textContent=new Date().toLocaleTimeString('de-CH
 /* ---------- Loop ---------- */
 let last=performance.now(),uiAcc=0;
 const live=new Map();
-function setSrc(txt,ok){const e=$('src');e.textContent=txt;e.classList.toggle('ok',!!ok);}
+function setSrc(txt,ok){       // "LIVE · adsb.fi": auf schmalen Bildschirmen nur "LIVE"
+  const e=$('src'),i=txt.indexOf(' · ');
+  e.innerHTML=i<0?esc(txt):esc(txt.slice(0,i))+'<span class="sn"> · '+esc(txt.slice(i+3))+'</span>';e.classList.toggle('ok',!!ok);
+}
 let liveTimer=null,airportGen=0,liveFails=0,ghosts=[],clockOff=null;
 const DELAY=5500;         // Anzeige läuft ~5,5 s hinter der Echtzeit: so liegt sie immer zwischen zwei bekannten Meldungen -> keine Sprünge
 async function liveLoop(){
