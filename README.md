@@ -17,9 +17,10 @@ Einstellungen in der `.env` (oder als Umgebungsvariablen in Portainer):
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `PORT` | `8765` | Port, auf dem die Anzeige per HTTP erreichbar ist |
+| `CACHE_PATH` | `/home/maran/serverdata/server/fr-display/cache` | Ordner auf dem Host für den Flughafen-Cache |
 | `START_ICAO` | `LSZH` | Flughafen, der beim Laden der Hauptseite `/` startet (ICAO oder IATA) |
 
-**Portainer:** Stacks → Add stack → *Repository* → `https://github.com/MFsquare-maran/FR-Display`, Compose-Pfad `docker-compose.yml`. Variablen (`PORT`, `START_ICAO`) unter *Environment variables* setzen oder die `.env` laden. Der Flughafen-Cache liegt im Volume `fr-display-cache`.
+**Portainer:** Stacks → Add stack → *Repository* → `https://github.com/MFsquare-maran/FR-Display`, Compose-Pfad `docker-compose.yml`. Variablen (`PORT`, `START_ICAO`) unter *Environment variables* setzen oder die `.env` laden. Der Flughafen-Cache liegt auf dem Host in `CACHE_PATH` (Standard `/home/maran/serverdata/server/fr-display/cache`) und bleibt bei Updates und beim Löschen des Stacks erhalten.
 
 ## Ohne Docker
 

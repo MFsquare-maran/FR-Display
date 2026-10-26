@@ -20,7 +20,10 @@ STALE_SEC = 30                   # bei Totalausfall alte Daten so lange weiterli
 GEO_KM = 6.5                     # Umkreis der Flughafen-Geometrie (Anzeige zeigt 5 km Radius)
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(HERE, "cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except OSError as e:
+    print("Cache-Ordner nicht anlegbar:", e, flush=True)
 
 SOURCES = [
     # {"name": "eigener Empfänger", "tpl": "http://localhost:8080/data/aircraft.json", "pause": 5},   # später
@@ -45,10 +48,13 @@ def http_get(url, data=None, timeout=20):
 
 
 def write_atomic(path, text):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:               # Cache nicht beschreibbar (z. B. Rechte am gemounteten Ordner): weiter ohne Speichern
+        print("WARNUNG: Cache nicht beschreibbar, Daten werden nicht gespeichert:", path, e, flush=True)
 
 
 # ---------------------------------------------------------------- Flugzeuge

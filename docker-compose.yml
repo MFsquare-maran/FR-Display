@@ -9,8 +9,9 @@ services:
       PORT: "${PORT:-8765}"
       START_ICAO: "${START_ICAO:-LSZH}"
       TZ: "${TZ:-Europe/Zurich}"
+    # Container läuft standardmäßig als root, damit der gemountete Cache-Ordner sicher beschreibbar ist
+    # (anderer Benutzer: PUID/PGID setzen und den Ordner mit chown passend vergeben)
+    user: "${PUID:-0}:${PGID:-0}"
     volumes:
-      - fr-display-cache:/app/cache
-
-volumes:
-  fr-display-cache:
+      # Flughafen-Cache liegt auf dem Host und überlebt Updates, Neuerstellen und Löschen des Stacks
+      - "${CACHE_PATH:-/home/maran/serverdata/server/fr-display/cache}:/app/cache"
