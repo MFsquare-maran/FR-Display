@@ -354,7 +354,10 @@ function renderStatic(){
     if(len<0.8)return;
     const f=w.p[0],l=w.p[w.p.length-1];
     g.textBaseline='middle';
-    [[parts[0],f,l],[parts[1],l,f]].forEach(([name,pt,far])=>{      // Zahl liegt hinter dem Pistenende, in Verlängerung der Piste
+    // Die Zahl steht am Pistenanfang, also dort, wo man in ihrer Richtung (Zahl x 10 Grad) landet: Reihenfolge der OSM-Punkte ist egal
+    const brg=(Math.atan2(l[0]-f[0],l[1]-f[1])*180/Math.PI+360)%360,hd=n=>{const v=parseInt(n,10)*10;return isNaN(v)?1e9:Math.abs(((v-brg+540)%360)-180);};
+    const first=hd(parts[0])<=hd(parts[1])?parts[0]:parts[1],second=first===parts[0]?parts[1]:parts[0];
+    [[first,f,l],[second,l,f]].forEach(([name,pt,far])=>{      // Zahl liegt hinter dem Pistenende, in Verlängerung der Piste
       const s=S({x:pt[0],y:pt[1]}),t=S({x:far[0],y:far[1]}),dx=s.x-t.x,dy=s.y-t.y,d=Math.hypot(dx,dy)||1,ux=dx/d,uy=dy/d;
       const hw=g.measureText(name).width/2+2,hh=8;                  // halbe Textbox
       const off=Math.min(Math.abs(ux)>1e-3?hw/Math.abs(ux):1e9,Math.abs(uy)>1e-3?hh/Math.abs(uy):1e9)+g.lineWidth/2+5;
