@@ -10,12 +10,14 @@ docker compose up -d --build
 
 Dann `http://<host>:8765` öffnen (nur HTTP).
 
+**Flughafen per URL wählen:** `http://<host>:8765/lszh`, `/eddf`, `/kjfk`, `/vie` … (ICAO oder IATA, 2–4 Zeichen). Die Hauptseite `/` startet mit `START_ICAO`.
+
 Einstellungen in der `.env` (oder als Umgebungsvariablen in Portainer):
 
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `PORT` | `8765` | Port, auf dem die Anzeige per HTTP erreichbar ist |
-| `START_ICAO` | `LSZH` | Flughafen, der bei jedem (Neu-)Laden der Seite startet (ICAO oder IATA) |
+| `START_ICAO` | `LSZH` | Flughafen, der beim Laden der Hauptseite `/` startet (ICAO oder IATA) |
 
 **Portainer:** Stacks → Add stack → *Repository* → `https://github.com/MFsquare-maran/FR-Display`, Compose-Pfad `docker-compose.yml`. Variablen (`PORT`, `START_ICAO`) unter *Environment variables* setzen oder die `.env` laden. Der Flughafen-Cache liegt im Volume `fr-display-cache`.
 
@@ -25,7 +27,7 @@ Einstellungen in der `.env` (oder als Umgebungsvariablen in Portainer):
 python server.py        # -> http://localhost:8765
 ```
 
-`PORT` und `START_ICAO` lassen sich auch hier als Umgebungsvariablen setzen. `http://localhost:8765/?icao=EDDF` überschreibt den Start-Flughafen, `?sim` startet die Simulation, `#kiosk` blendet den Mauszeiger aus (Raspberry Pi / Chromium `--kiosk`).
+`PORT` und `START_ICAO` lassen sich auch hier als Umgebungsvariablen setzen. `http://localhost:8765/eddf` (oder `?icao=EDDF`) überschreibt den Start-Flughafen, `?sim` startet die Simulation, `#kiosk` blendet den Mauszeiger aus (Raspberry Pi / Chromium `--kiosk`).
 
 ## Aufbau
 

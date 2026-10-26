@@ -8,7 +8,7 @@ Umgebungsvariablen:  PORT (Standard 8765), START_ICAO (Flughafen beim Laden der 
                                    -> wird in ./cache gespeichert, beim zweiten Mal sofort da.
 Später eigener Empfänger (RTL-SDR + readsb am RPi): URL in SOURCES als erste Quelle eintragen, dann unbegrenzt.
 """
-import csv, io, json, math, os, queue, sys, time, threading, urllib.request, urllib.parse
+import csv, io, json, math, os, queue, re, sys, time, threading, urllib.request, urllib.parse
 from functools import partial
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
@@ -266,7 +266,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if res is None:
                     return self.send_json(404, {"error": f"Flughafen '{code.upper()}' nicht gefunden"})
                 return self.send_json(200, res)
-            if u.path not in STATIC and not (u.path.startswith("/assets/") and ".." not in u.path):
+            if re.fullmatch(r"/[A-Za-z0-9]{2,4}/?", u.path) and u.path not in STATIC:       # /lszh, /eddf, ... -> Anzeige mit diesem Flughafen
+                self.path = "/index.html" + ("?" + u.query if u.query else "")
+            elif u.path not in STATIC and not (u.path.startswith("/assets/") and ".." not in u.path):
                 return self.send_error(404)
         except Exception as e:
             print("Fehler:", self.path, e, flush=True)
