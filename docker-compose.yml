@@ -1,6 +1,7 @@
 services:
   fr-display:
     build: .
+    pull_policy: build        # bei jedem Deploy (auch Pull and redeploy in Portainer) das Image neu bauen
     container_name: fr-display
     restart: unless-stopped
     ports:
