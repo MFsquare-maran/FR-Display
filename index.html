@@ -487,9 +487,25 @@ const MFR=[   // ICAO-Typcode -> Hersteller (icon = Datei in assets/, sonst Schr
 const mfrOf=t=>{const m=MFR.find(([re])=>re.test(t||''));return m?m[1]:null;};
 const mfrImgs=new Map();
 function mfrImg(n){if(!mfrImgs.has(n)){const im=new Image();im.src='/assets/'+n+'.svg';mfrImgs.set(n,im);}return mfrImgs.get(n);}
+// Passt die Strecke aus der Datenbank (nach Callsign, oft veraltet) zu dem, was das Flugzeug gerade tut?
+const dkm=(a,b,c,d)=>{const r=Math.PI/180,x=(c-a)*r,y=(d-b)*r,h=Math.sin(x/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(y/2)**2;return 12742*Math.asin(Math.sqrt(h));};
+function routePlausible(p,rt){
+  if(CONFIG.source!=='live')return true;
+  const o=rt&&rt.origin,d=rt&&rt.dest;if(!o||!d)return false;
+  const here=[A.icao,A.iata].filter(Boolean),has=x=>!!x&&(here.includes(x.icao)||here.includes(x.iata));
+  if(p.mode!=='air')return has(o)||has(d);                  // am Boden: muss von/nach diesem Flughafen sein
+  if(p.kind==='arr')return has(d);                           // Anflug: Ziel = dieser Flughafen
+  if(p.kind==='dep')return has(o);                           // Abflug: Start = dieser Flughafen
+  const c=CONFIG.center,lat=c.lat+p.y/111.19,lon=c.lon+p.x/(111.19*Math.cos(c.lat*Math.PI/180));
+  let onWay=true;                                            // Überflug: Flugzeug muss grob zwischen Start und Ziel liegen
+  if(o.lat!=null&&d.lat!=null){const L=dkm(o.lat,o.lon,d.lat,d.lon);onWay=dkm(o.lat,o.lon,lat,lon)+dkm(lat,lon,d.lat,d.lon)<=L*1.2+30;}
+  if(p.alt<8000)return onWay||has(o)||has(d);                // tief: könnte auch ein Start/Anflug sein
+  return onWay&&!has(o)&&!has(d);                            // hoch: nach/von hier kann es dann nicht sein
+}
 // Alles Nötige für die Fluginfo geladen (Strecke, Logos)? Erst dann wird zu diesem Flug gewechselt -> kein Layout-Sprung
 function readyOf(p){
   const rt=routeOf(p);if(rt===null)return false;
+  p.rtOk=routePlausible(p,rt);                                 // Entscheidung steht fest, bevor die Info eingeblendet wird (kein Layout-Sprung)
   const iata=(rt&&rt.airline&&rt.airline.iata)||(CONFIG.source!=='live'?AL_IATA[(p.callsign||'').slice(0,3)]:'');
   if(/^[A-Z0-9]{2}$/.test(iata||'')){logoOf(iata);if(logos.get(iata)===null)return false;}
   const mf=mfrOf(p.type);if(mf&&mf.icon&&!mfrImg(mf.icon).complete)return false;
@@ -500,7 +516,8 @@ function drawInfo(sel){
   const o=S({x:0,y:0}),Rpx=R*pxkm,u=clamp(Rpx/16,13,24),F=(w,k)=>`${w} ${Math.round(u*k)}px system-ui`;
   const rt=routeOf(sel)||{},al=rt.airline||{},og=rt.origin||{},ds=rt.dest||{};
   const sh=t=>t.length>13?t.slice(0,12)+'…':t;
-  const hasRt=(og.iata||og.icao)&&(ds.iata||ds.icao);
+  if(sel.rtOk===undefined)sel.rtOk=routePlausible(sel,rt);
+  const hasRt=sel.rtOk&&(og.iata||og.icao)&&(ds.iata||ds.icao);
   const rows=[[[sel.callsign,F(600,1.45),'#fff']]];
   if(hasRt)rows.push([[og.iata||og.icao,F(600,1),'#fff'],[og.city?' '+sh(og.city):'',F(400,.85),'#8a8a8a'],['   →   ',F(400,1),'#f5b932'],
       [ds.iata||ds.icao,F(600,1),'#fff'],[ds.city?' '+sh(ds.city):'',F(400,.85),'#8a8a8a']]);

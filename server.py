@@ -100,7 +100,8 @@ def fetch_route(cs):
         if isinstance(fr, dict) and fr.get("flightroute"):
             fr = fr["flightroute"]
             ap = lambda x: {"iata": x.get("iata_code", ""), "icao": x.get("icao_code", ""),
-                            "name": x.get("name", ""), "city": x.get("municipality", "")} if x else None
+                            "name": x.get("name", ""), "city": x.get("municipality", ""),
+                            "lat": x.get("latitude"), "lon": x.get("longitude")} if x else None
             al = fr.get("airline") or {}
             res = {"airline": {"name": al.get("name", ""), "iata": al.get("iata", ""), "icao": al.get("icao", "")},
                    "origin": ap(fr.get("origin")), "dest": ap(fr.get("destination"))}
