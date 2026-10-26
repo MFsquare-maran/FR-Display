@@ -1,0 +1,5 @@
+.git
+.env
+cache
+README.md
+docker-compose.yml

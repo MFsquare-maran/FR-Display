@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airport Radar Display</title>
+<style>
+  :root{ --bg:#000; --line:#2a2a2a; --text:#fff; --dim:#8a8a8a; --accent:#f5b932; }
+  *{box-sizing:border-box;margin:0}
+  html,body{height:100%;background:var(--bg);color:var(--text);
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;overflow:hidden}
+  body.kiosk{cursor:none}
+  #app{display:grid;grid-template-rows:48px 1fr;height:100vh}
+  header{display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--line)}
+  .apt{font-size:20px;font-weight:600;letter-spacing:.04em;white-space:nowrap}
+  .apt small{color:var(--dim);font-weight:400;font-size:13px;margin-left:10px;letter-spacing:.1em}
+  .sp{flex:1}
+  #icao{width:80px;background:#000;border:1px solid var(--line);border-radius:6px;color:var(--text);
+    font:600 13px/1 system-ui;letter-spacing:.12em;text-transform:uppercase;text-align:center;padding:7px 6px;outline:none}
+  #icao:focus{border-color:#fff}
+  #icao.err{border-style:dashed;border-color:#fff}
+  #icao.busy{opacity:.5}
+  #apt-msg{font-size:12px;color:var(--text);white-space:nowrap}
+  .src{font-size:11px;letter-spacing:.14em;padding:3px 8px;border:1px solid var(--dim);color:var(--dim);border-radius:3px}
+  .src.ok{border-color:#fff;color:#fff}
+  #clock{font-variant-numeric:tabular-nums;font-size:20px;font-weight:300}
+  #radar{position:relative;min-height:0}
+  canvas{position:absolute;inset:0;width:100%;height:100%}
+  @media (max-width:560px){ .apt small{display:none} }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="apt"><span id="aptName">ZÜRICH</span><small id="aptCodes">LSZH · ZRH</small></div>
+    <form id="icaoForm" autocomplete="off"><input id="icao" maxlength="4" placeholder="ICAO" spellcheck="false" title="ICAO- oder IATA-Code, z.B. EDDF, KJFK, LFPG, VIE"></form>
+    <div id="apt-msg"></div>
+    <div class="sp"></div>
+    <div class="src" id="src">SIMULATION</div>
+    <div id="clock">--:--:--</div>
+  </header>
+  <div id="radar"><canvas id="cv"></canvas></div>
+</div>
+
+<script src="lszh_data.js"></script><!-- OSM-Geometrie des Flughafens (km relativ zum Zentrum) -->
+<script>
+/* ============================================================
+   KONFIG
+   Später: source:'live' und fetchLive() mit echten Daten füllen
+   (dump1090/readsb am RPi, OpenSky, ...). Format siehe normalize().
+   Ansicht: fester Radius von 5 km um den Flughafen.  URL-Zusatz #kiosk = Maus ausblenden.
+   ============================================================ */
+const CONFIG = {
+  source: location.search.includes('sim') ? 'sim' : 'live',   // live = echte Daten via server.py, ?sim = Simulation
+  viewKm: 5,                // fester Anzeige-Radius
+  fetchNm: 8,               // Abfrage-Radius der Live-Daten in nautischen Meilen; wird aus der Bildschirmgröße berechnet (resize)
+  warp: 8,                  // Zeitraffer der Simulation
+  autoSelectSec: 7,
+  center: {lat:47.4647, lon:8.5492}
+};
+if (location.hash.includes('kiosk')) document.body.classList.add('kiosk');
+
+// Aktueller Flughafen (Standard: Zürich, fest eingebaut aus lszh_data.js; andere kommen vom Server per ICAO)
+const LSZH_DEFAULT = {icao:'LSZH',iata:'ZRH',name:'Zürich',lat:47.4647,lon:8.5492,
+  view:{R:2.5,vc:{x:0.45,y:-0.15}},...LSZH};
+let A = LSZH_DEFAULT;
+
+/* ---------- Live-Platzhalter ---------- */
+// Erwartet Liste von {id, callsign, type, from, to, lat, lon, alt(ft), gs(kt), hdg(deg), vs(ft/min), onGround}
+async function fetchLive(){ return []; }
+function latlonToKm(lat,lon){
+  const R=6371, r=Math.PI/180;
+  return { x:(lon-CONFIG.center.lon)*r*R*Math.cos(CONFIG.center.lat*r), y:(lat-CONFIG.center.lat)*r*R };
+}
+function normalize(a){
+  const p=latlonToKm(a.lat,a.lon);
+  const kind = a.vs<-300 && a.alt<8000 ? 'arr' : a.vs>300 && a.alt<12000 ? 'dep' : 'ovr';
+  return {...a, spd:a.gs, x:p.x, y:p.y, kind, mode:a.onGround?'taxi':'air', dist:Math.hypot(p.x,p.y), trail:[]};
+}
+
+/* ---------- Hilfsfunktionen ---------- */
+const KT=0.000514444;                  // km/s pro Knoten
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const rad=d=>d*Math.PI/180;
+const vec=h=>({x:Math.sin(rad(h)),y:Math.cos(rad(h))});
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* ---------- Rollwegnetz aus OSM ---------- */
+const G={nodes:[],adj:[],cell:new Map(),main:new Set(),stands:[]};
+function gNode(x,y){
+  const cs=0.008, ix=Math.round(x/cs), iy=Math.round(y/cs);
+  for(let a=-1;a<=1;a++)for(let b=-1;b<=1;b++){
+    const l=G.cell.get((ix+a)+','+(iy+b));
+    if(l)for(const id of l){const n=G.nodes[id];if(Math.hypot(n.x-x,n.y-y)<cs)return id;}
+  }
+  const id=G.nodes.length;G.nodes.push({x,y});G.adj.push([]);
+  const k=ix+','+iy;if(!G.cell.has(k))G.cell.set(k,[]);G.cell.get(k).push(id);return id;
+}
+function inPoly(x,y,poly){
+  let c=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const a=poly[i],b=poly[j];
+    if((a[1]>y)!==(b[1]>y) && x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0]) c=!c;
+  }
+  return c;
+}
+function buildGraph(){
+  G.nodes=[];G.adj=[];G.cell=new Map();G.main=new Set();G.stands=[];
+  A.taxiway.forEach(w=>{
+    let prev=null;
+    w.p.forEach(pt=>{
+      const id=gNode(pt[0],pt[1]);
+      if(prev!==null&&prev!==id){
+        const d=Math.hypot(G.nodes[id].x-G.nodes[prev].x,G.nodes[id].y-G.nodes[prev].y);
+        G.adj[prev].push([id,d]);G.adj[id].push([prev,d]);
+      }
+      prev=id;
+    });
+  });
+  // größte zusammenhängende Komponente
+  const comp=new Array(G.nodes.length).fill(-1);let best=[],cid=0;
+  for(let i=0;i<G.nodes.length;i++){
+    if(comp[i]>=0)continue;
+    const q=[i],mem=[];comp[i]=cid;
+    while(q.length){const n=q.pop();mem.push(n);G.adj[n].forEach(([m])=>{if(comp[m]<0){comp[m]=cid;q.push(m);}});}
+    if(mem.length>best.length)best=mem;cid++;
+  }
+  G.main=new Set(best);
+  G.stands=best.filter(i=>A.apron.some(a=>inPoly(G.nodes[i].x,G.nodes[i].y,a.p)));
+}
+function nearest(x,y){
+  let bi=-1,bd=1e9;
+  G.main.forEach(i=>{const n=G.nodes[i],d=Math.hypot(n.x-x,n.y-y);if(d<bd){bd=d;bi=i;}});
+  return bi;
+}
+function route(a,b){            // Dijkstra
+  const dist=new Map([[a,0]]),prev=new Map(),done=new Set(),h=[[0,a]];
+  const push=e=>{h.push(e);let i=h.length-1;while(i>0){const p=(i-1)>>1;if(h[p][0]<=h[i][0])break;[h[p],h[i]]=[h[i],h[p]];i=p;}};
+  const pop=()=>{const t=h[0],l=h.pop();if(h.length){h[0]=l;let i=0;for(;;){let m=i,L=2*i+1,R=L+1;
+    if(L<h.length&&h[L][0]<h[m][0])m=L;if(R<h.length&&h[R][0]<h[m][0])m=R;if(m===i)break;[h[m],h[i]]=[h[i],h[m]];i=m;}}return t;};
+  while(h.length){
+    const [d,n]=pop();if(done.has(n))continue;done.add(n);if(n===b)break;
+    G.adj[n].forEach(([m,w])=>{const nd=d+w;if(nd<(dist.get(m)??1e9)){dist.set(m,nd);prev.set(m,n);push([nd,m]);}});
+  }
+  if(!done.has(b))return null;
+  const path=[];for(let n=b;n!==undefined;n=prev.get(n))path.push({x:G.nodes[n].x,y:G.nodes[n].y});
+  return path.reverse();
+}
+
+/* ---------- Simulation ---------- */
+// Simulations-Pisten: arr = Landepiste (Schwelle a, Kurs h), dep = Startpiste
+let RWY={arr:{a:{x:0,y:0},h:90,len:2},dep:{a:{x:0,y:0},h:90,len:2}};
+const HOME=()=>A.iata||A.icao;
+function setupRunways(){
+  if(A.icao==='LSZH'){   // Zürich: Landung Piste 14, Start Piste 28 (Koordinaten aus OSM)
+    RWY={arr:{a:{x:-1.0,y:1.93},h:137,len:3.1},dep:{a:{x:1.598,y:-0.901},h:276,len:2.5}};return;
+  }
+  let best=null,bl=0;      // sonst: längste Piste, Landung und Start in dieselbe Richtung
+  A.runway.filter(w=>!w.r.startsWith('H')).forEach(w=>{
+    let l=0;for(let i=1;i<w.p.length;i++)l+=Math.hypot(w.p[i][0]-w.p[i-1][0],w.p[i][1]-w.p[i-1][1]);
+    if(l>bl){bl=l;best=w;}
+  });
+  if(!best){RWY={arr:{a:{x:-1,y:0},h:90,len:2},dep:{a:{x:-1,y:0},h:90,len:2}};return;}
+  const a=best.p[0],b=best.p[best.p.length-1];
+  const h=(Math.atan2(b[0]-a[0],b[1]-a[1])*180/Math.PI+360)%360;
+  RWY={arr:{a:{x:a[0],y:a[1]},h,len:bl},dep:{a:{x:a[0],y:a[1]},h,len:bl}};
+}
+const AIRL=[
+ ['SWR','A320','Swiss'],['SWR','A321','Swiss'],['SWR','BCS3','Swiss'],['SWR','A343','Swiss'],
+ ['EZY','A320','easyJet'],['DLH','A320','Lufthansa'],['AFR','A319','Air France'],
+ ['BAW','A320','British Airways'],['EDW','A343','Edelweiss'],['KLM','E190','KLM'],
+ ['AUA','E195','Austrian'],['THY','A321','Turkish'],['UAE','B77W','Emirates'],['ITY','A319','ITA']
+];
+const CITY=['LHR','CDG','FRA','AMS','VIE','BCN','MAD','LIS','FCO','CPH','DXB','JFK','IST','ATH','OTP'];
+const AL_IATA={SWR:'LX',EZY:'U2',DLH:'LH',AFR:'AF',BAW:'BA',EDW:'WK',KLM:'KL',AUA:'OS',THY:'TK',UAE:'EK',ITY:'AZ'};
+let uid=0;
+function callsign(al){return al[0]+(100+Math.floor(Math.random()*899))+(Math.random()<.4?String.fromCharCode(65+Math.floor(Math.random()*26)):'')}
+function base(kind){
+  const al=pick(AIRL);
+  return {id:++uid,callsign:callsign(al),type:al[1],airline:al[2],kind,trail:[],tAcc:0,vs:0,alt:0,spd:0,hdg:0,x:0,y:0,dist:0,mode:'air'};
+}
+function mkAir(kind){
+  const p=base(kind),city=pick(CITY);
+  if(kind==='arr'){p.from=city;p.to=HOME();p.s=46;p.spd=200;}
+  else{ p.from=pick(CITY);p.to=pick(CITY);p.alt=rnd(31000,39000);p.spd=rnd(410,480);
+    const h=rnd(0,360),off=rnd(-30,30),n=vec(h),o={x:-n.y,y:n.x};
+    p.hdg=h;p.x=-n.x*58+o.x*off+n.x*rnd(10,100);p.y=-n.y*58+o.y*off+n.y*rnd(10,100);}
+  place(p,0);return p;
+}
+function freeStand(){
+  const used=planes.filter(p=>p.mode==='park'||(p.mode==='taxi'&&p.after==='park')).map(p=>p.standPos).filter(Boolean);
+  for(let i=0;i<40;i++){
+    const n=G.nodes[pick(G.stands)];
+    if(!used.some(u=>Math.hypot(u.x-n.x,u.y-n.y)<0.05))return n;
+  }
+  return G.nodes[pick(G.stands)];
+}
+function mkPark(timer){
+  const p=base('dep'),n=freeStand(),city=pick(CITY);
+  p.from=HOME();p.to=city;p.mode='park';p.x=n.x;p.y=n.y;p.standPos=n;
+  p.hdg=pick([0,45,90,135,180,225,270,315])+rnd(-10,10);p.timer=timer??rnd(60,600);p.dist=Math.hypot(p.x,p.y);
+  return p;
+}
+function startTaxi(p,path,after){
+  p.mode='taxi';p.after=after;p.path=path.slice(1);p.spd=22;p.alt=0;p.vs=0;
+}
+function taxiIn(p){
+  if(!G.stands.length){p.dead=true;return;}      // Flughafen ohne Rollwegdaten: Maschine verschwindet nach der Landung
+  const n=freeStand(),a=nearest(p.x,p.y),b=nearest(n.x,n.y);
+  const r=route(a,b)||[{x:p.x,y:p.y},n];
+  p.kind='arr';p.standPos=n;p.from=p.from;
+  startTaxi(p,[{x:p.x,y:p.y},...r,n],'park');
+}
+function taxiOut(p){
+  const hold=nearest(RWY.dep.a.x,RWY.dep.a.y),a=nearest(p.x,p.y);
+  const r=route(a,hold)||[];
+  p.kind='dep';p.standPos=null;
+  startTaxi(p,[{x:p.x,y:p.y},...r,RWY.dep.a],'takeoff');
+}
+function place(p,dt){
+  if(p.mode==='park'){
+    p.timer-=dt;
+    if(p.timer<0 && planes.filter(q=>q.mode==='taxi'&&q.after==='takeoff').length<2) taxiOut(p);
+  }
+  else if(p.mode==='taxi'){
+    let step=p.spd*KT*dt;
+    while(step>0&&p.path.length){
+      const t=p.path[0],dx=t.x-p.x,dy=t.y-p.y,d=Math.hypot(dx,dy);
+      if(d>0.0005){
+        const th=(Math.atan2(dx,dy)*180/Math.PI+360)%360,df=((th-p.hdg+540)%360)-180;
+        p.hdg=(p.hdg+df*Math.min(1,dt*1.2)+360)%360;
+      }
+      if(step>=d){p.x=t.x;p.y=t.y;step-=d;p.path.shift();}
+      else{p.x+=dx/d*step;p.y+=dy/d*step;step=0;}
+    }
+    if(!p.path.length){
+      if(p.after==='park'){
+        const al=pick(AIRL);Object.assign(p,{mode:'park',timer:rnd(120,500),callsign:callsign(al),type:al[1],airline:al[2],from:HOME(),to:pick(CITY),kind:'dep',spd:0,standPos:{x:p.x,y:p.y}});
+      }else{
+        Object.assign(p,{mode:'air',kind:'dep',s:0,px:RWY.dep.a.x,py:RWY.dep.a.y,hdg:RWY.dep.h,spd:40,
+          turn:pick([-1,1])*rnd(20,150),target:null,trail:[]});
+      }
+    }
+  }
+  else if(p.kind==='arr'){
+    const r=RWY.arr,d=vec(r.h);
+    p.s-=p.spd*KT*dt;
+    if(p.s>=0){
+      p.spd=clamp(135+(p.s-4)*3.2,135,250);
+      p.alt=Math.max(0,p.s*172+40);p.vs=-Math.round(p.spd*5.3);
+    }else{                                          // Ausrollen
+      p.alt=0;p.vs=0;p.spd=30+105*clamp(1+p.s/1.8,0,1);
+    }
+    p.hdg=r.h;p.x=r.a.x-d.x*p.s;p.y=r.a.y-d.y*p.s;
+    if(p.s<=-1.8){taxiIn(p);}
+  }
+  else if(p.kind==='dep'){
+    const r=RWY.dep;
+    p.s+=p.spd*KT*dt;
+    p.spd=Math.min(300,40+p.s*90);
+    p.alt=p.s<1.8?0:Math.min(14000,(p.s-1.8)*330);p.vs=p.s<1.8?0:2200;
+    p.px+=Math.sin(rad(p.hdg))*p.spd*KT*dt;p.py+=Math.cos(rad(p.hdg))*p.spd*KT*dt;
+    if(p.s>5){
+      if(p.target==null)p.target=((r.h+p.turn)+360)%360;
+      const diff=((p.target-p.hdg+540)%360)-180;
+      p.hdg=(p.hdg+Math.sign(diff)*Math.min(Math.abs(diff),3*dt)+360)%360;
+    }
+    p.x=p.px;p.y=p.py;
+    if(Math.hypot(p.x,p.y)>60)p.dead=true;
+  }
+  else{
+    const d=vec(p.hdg);p.x+=d.x*p.spd*KT*dt;p.y+=d.y*p.spd*KT*dt;p.vs=0;
+    if(Math.hypot(p.x,p.y)>72&&p.x*d.x+p.y*d.y>0)p.dead=true;
+  }
+  p.dist=Math.hypot(p.x,p.y);
+}
+let planes=[];
+function simStep(dt){
+  planes.forEach(p=>place(p,dt));planes=planes.filter(p=>!p.dead);
+  const air=k=>planes.filter(p=>p.mode==='air'&&p.kind===k).length;
+  const busy=planes.filter(p=>p.mode==='park'||(p.mode==='taxi'&&p.after==='park')).length;
+  if(air('arr')<4&&busy<13&&Math.random()<dt*.05)planes.push(mkAir('arr'));
+  if(air('ovr')<3&&Math.random()<dt*.02)planes.push(mkAir('ovr'));
+  if(G.stands.length&&planes.filter(p=>p.mode==='park').length<6&&Math.random()<dt*.01)planes.push(mkPark(rnd(30,200)));
+}
+function simInit(){
+  planes=[];
+  if(G.stands.length)for(let i=0;i<9;i++)planes.push(mkPark(i<3?rnd(5,40):rnd(60,500)));
+  const arr=[];for(let i=0;i<4;i++){const p=mkAir('arr');p.s=6+i*10+rnd(0,4);place(p,0);planes.push(p);}
+  for(let i=0;i<3;i++)planes.push(mkAir('ovr'));
+}
+
+/* ---------- Rendering ---------- */
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+let W=0,H=0,DPR=1,cx=0,cy=0,pxkm=1,stat=null;
+const VC={x:0,y:0};let R=CONFIG.viewKm;
+function resize(){
+  DPR=window.devicePixelRatio||1;
+  const r=cv.getBoundingClientRect();W=r.width;H=r.height;
+  cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);
+  cx=W/2;cy=H/2;
+  pxkm=Math.max(.5,(Math.min(W,H)/2-18)/R);
+  CONFIG.fetchNm=Math.max(6,Math.min(60,Math.ceil(Math.hypot(W,H)/2/pxkm/1.852)+2));   // reicht bis in die Bildschirmecken
+  stat=null;
+}
+addEventListener('resize',resize);
+new ResizeObserver(resize).observe(document.getElementById('radar'));
+const S=p=>({x:cx+(p.x-VC.x)*pxkm,y:cy-(p.y-VC.y)*pxkm});
+function poly(c,pts,close){
+  c.beginPath();pts.forEach((q,i)=>{const s=S({x:q[0],y:q[1]});i?c.lineTo(s.x,s.y):c.moveTo(s.x,s.y);});
+  if(close)c.closePath();
+}
+function renderStatic(){
+  const c=document.createElement('canvas');c.width=W*DPR;c.height=H*DPR;
+  const g=c.getContext('2d');g.setTransform(DPR,0,0,DPR,0,0);
+  const o=S({x:0,y:0});
+  g.fillStyle='#000';g.fillRect(0,0,W,H);
+  // Ringe (1 km Raster, äußerer Ring = 5 km)
+  g.lineWidth=1;g.font='11px system-ui';
+  for(let r=1;r<=R;r++){
+    g.strokeStyle=r===R?'#555':'#1d1d1d';g.fillStyle=r===R?'#aaa':'#555';
+    if(r!==R-1){g.beginPath();g.arc(o.x,o.y,r*pxkm,0,7);g.stroke();}      // Ring R-1 wird pro Frame gezeichnet (mit Lücke für die Fluginfo)
+    const ly=o.y-r*pxkm-3;if(ly>10&&ly<H)g.fillText(r+' km',o.x+4,ly);
+  }
+  // Vorfelder
+  g.fillStyle='#141414';g.strokeStyle='#2c2c2c';g.lineWidth=1;
+  A.apron.forEach(a=>{poly(g,a.p,true);g.fill();g.stroke();});
+  // Rollwege
+  g.lineCap='round';g.lineJoin='round';
+  g.strokeStyle='#5a5a5a';g.lineWidth=clamp(pxkm*0.02,1,2.2);
+  A.taxiway.forEach(w=>{poly(g,w.p,false);g.stroke();});
+  // Terminals
+  g.fillStyle='#303030';g.strokeStyle='#8a8a8a';g.lineWidth=1;
+  A.terminal.forEach(t=>{poly(g,t.p,true);g.fill();g.stroke();});
+  // Pisten
+  const rw=A.runway.filter(w=>!w.r.startsWith('H'));
+  g.strokeStyle='#e6e6e6';g.lineWidth=clamp(pxkm*0.03,2,6);
+  rw.forEach(w=>{poly(g,w.p,false);g.stroke();});
+  g.strokeStyle='#000';g.lineWidth=1;g.setLineDash([pxkm*0.06,pxkm*0.05]);
+  rw.forEach(w=>{poly(g,w.p,false);g.stroke();});g.setLineDash([]);
+  // Pistenbezeichnung
+  g.fillStyle='#fff';g.font='600 12px system-ui';g.textAlign='center';
+  rw.forEach(w=>{                         // Ref "14/32": erste Hälfte am Anfang, zweite am Ende der Piste
+    const parts=w.r.split('/');if(parts.length!==2)return;
+    let len=0;for(let i=1;i<w.p.length;i++)len+=Math.hypot(w.p[i][0]-w.p[i-1][0],w.p[i][1]-w.p[i-1][1]);
+    if(len<0.8)return;
+    const f=w.p[0],l=w.p[w.p.length-1],n=w.p[Math.min(1,w.p.length-1)],m=w.p[w.p.length-2];
+    [[parts[0],f,n],[parts[1],l,m]].forEach(([name,pt,nb])=>{
+      const s=S({x:pt[0],y:pt[1]}),t=S({x:nb[0],y:nb[1]}),dx=s.x-t.x,dy=s.y-t.y,d=Math.hypot(dx,dy)||1;
+      g.fillText(name,s.x+dx/d*14,s.y+dy/d*14+4);
+    });
+  });
+  // Norden
+  g.fillStyle='#aaa';g.font='600 13px system-ui';
+  g.fillText('N',W-22,22);g.textAlign='left';
+  stat=c;
+}
+
+const HEAVY=/^(A38|B74|B77|B78|A33|A34|A35|B76|MD11|IL9|A124|C5M|B52)/,SMALL=/^(CRJ|E1|E2|E3|DH8|AT[4-7]|BCS|SF3|PC1|C\d|PA\d|SR2|DA\d|BE\d|P28|TBM)/;
+const sizeOf=t=>HEAVY.test(t||'')?1.3:SMALL.test(t||'')?.82:1;
+function planePath(c){      // Draufsicht, Nase nach oben, ca. 24 Einheiten lang
+  c.beginPath();
+  c.moveTo(0,-12);c.quadraticCurveTo(1.9,-10,1.9,-6);        // Nase
+  c.lineTo(1.9,-2.5);c.lineTo(11,4.5);c.lineTo(11,6.6);c.lineTo(1.9,3.4);   // Tragfläche
+  c.lineTo(1.5,8);c.lineTo(5,10.6);c.lineTo(5,12);c.lineTo(0.8,10.8);       // Leitwerk
+  c.lineTo(0,12);
+  c.lineTo(-0.8,10.8);c.lineTo(-5,12);c.lineTo(-5,10.6);c.lineTo(-1.5,8);
+  c.lineTo(-1.9,3.4);c.lineTo(-11,6.6);c.lineTo(-11,4.5);c.lineTo(-1.9,-2.5);
+  c.lineTo(-1.9,-6);c.quadraticCurveTo(-1.9,-10,0,-12);c.closePath();
+}
+const TRAIL_MS=45000;       // so lange bleibt ein Schweifpunkt; er wird dabei kontinuierlich durchsichtiger
+function updateTrails(now){
+  planes.forEach(p=>{
+    if(p.mode==='air'){
+      if(!p.tt||now-p.tt>800){p.tt=now;p.trail.push({x:p.x,y:p.y,t:now});}
+    }
+    while(p.trail.length&&now-p.trail[0].t>TRAIL_MS)p.trail.shift();
+  });
+  ghosts=ghosts.filter(g=>{while(g.length&&now-g[0].t>TRAIL_MS)g.shift();return g.length>1;});
+}
+function drawTrail(trail,head,now){
+  if(trail.length<1)return;
+  ctx.lineWidth=1;
+  let prev=trail[0];
+  for(let i=1;i<=trail.length;i++){
+    const q=i<trail.length?trail[i]:head;if(!q)break;
+    const age=(now-(i<trail.length?q.t:trail[trail.length-1].t))/TRAIL_MS;      // Alter des Segments -> Transparenz
+    const a=S(prev),b=S(q);
+    ctx.globalAlpha=Math.max(0,.45*(1-age));ctx.strokeStyle='#fff';
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    prev=q;
+  }
+  ctx.globalAlpha=1;
+}
+const onScreen=(p,m=0)=>{const s=S(p);return s.x>=-m&&s.x<=W+m&&s.y>=-m&&s.y<=H+m;};
+function drawPlane(p,sel){
+  const s=S(p);
+  const ground=p.mode!=='air',parked=p.mode==='park';
+  if(!ground)drawTrail(p.trail,p,performance.now());                       // Schweif bleibt, auch wenn das Flugzeug den Bildschirm verlassen hat
+  if(!onScreen(p,20))return;                             // Flugzeug nur zeichnen, solange es auf dem Bildschirm ist
+  const k=Math.max(.8,Math.min(1.5,Math.min(W,H)/800))*sizeOf(p.type);
+  ctx.save();ctx.translate(s.x,s.y);ctx.rotate(rad(p.hd??p.hdg));ctx.scale(k,k);
+  planePath(ctx);
+  ctx.lineJoin='round';
+  ctx.fillStyle='#fff';ctx.fill();ctx.strokeStyle='#000';ctx.lineWidth=1.2/k;ctx.stroke();
+  ctx.restore();
+  if(sel){ctx.globalAlpha=dispA;ctx.strokeStyle='#f5b932';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(s.x,s.y,17*k+5,0,7);ctx.stroke();ctx.globalAlpha=1;}
+  if(ground)return;                     // Namen nur für Flugzeuge in der Luft
+  const fs=Math.round(11*Math.max(1,Math.min(1.35,Math.min(W,H)/560)));
+  ctx.font=`600 ${fs}px system-ui`;ctx.fillStyle='#fff';
+  ctx.fillText(p.callsign,s.x+14*k+6,s.y-3);
+  ctx.font=`${fs-1}px system-ui`;ctx.fillStyle='#8a8a8a';
+  ctx.fillText(fmtAlt(p)+'  '+Math.round(p.spd)+' kt',s.x+14*k+6,s.y+fs);
+}
+
+/* ---------- UI ---------- */
+let infoGap={c:Math.PI/2,half:0};   // Winkelbereich der Fluginfo (Lücke im inneren Ring)
+let selId=null,lastSel=0,dispId=null,dispA=0,waitT=0,lastShown=null;      // dispId/dispA: aktuell angezeigter Flug und dessen Einblendung (0..1)
+const $=id=>document.getElementById(id);
+const esc=t=>String(t??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function fmtAlt(p){
+  if(p.mode!=='air'||p.alt<5)return'Boden';
+  return p.alt>=5000?'FL'+String(Math.round(p.alt/100)).padStart(3,'0'):Math.round(p.alt/10)*10+' ft';
+}
+function visible(){return planes.filter(p=>p.mode!=='park'&&onScreen(p));}      // nur was auf dem Bildschirm zu sehen ist
+
+// Strecke und Airline (Live: vom Server, kostenlos via adsbdb; Simulation: eigene Daten)
+const routes=new Map();      // Callsign -> null (lädt) | Objekt | false (unbekannt)
+function routeOf(p){
+  if(CONFIG.source!=='live'){
+    const pre=(p.callsign||'').slice(0,3);
+    return {airline:{name:p.airline,iata:AL_IATA[pre]},origin:{iata:p.from},dest:{iata:p.to}};
+  }
+  const cs=p.callsign;
+  if(!/^[A-Z]{3}\d/.test(cs))return false;
+  if(routes.has(cs))return routes.get(cs);
+  routes.set(cs,null);
+  fetch('/api/route?callsign='+encodeURIComponent(cs),{signal:AbortSignal.timeout(10000)}).then(r=>r.json())
+    .then(j=>routes.set(cs,j&&(j.airline||j.origin)?j:false)).catch(()=>routes.delete(cs));
+  return null;
+}
+const logos=new Map();       // IATA -> Image (geladen) | null (fehlt)
+function logoOf(iata){
+  if(!/^[A-Z0-9]{2}$/.test(iata||''))return null;
+  if(!logos.has(iata)){
+    const im=new Image();logos.set(iata,null);
+    im.onload=()=>logos.set(iata,im);im.onerror=()=>logos.set(iata,false);im.src='https://pics.avs.io/120/120/'+iata+'.png';
+  }
+  return logos.get(iata);
+}
+// Text entlang des unteren Bogens (Buchstabenoberkante zeigt zur Mitte); segs = [[text,font,farbe],...]
+function arcText(segs,r,start=Math.PI/2,measure=false){
+  const gap=.6,parts=[];let w=0;
+  segs.forEach(([t,f,c])=>{ctx.font=f;[...t].forEach(ch=>{const cw=ctx.measureText(ch).width+gap;parts.push([ch,f,c,cw]);w+=cw;});});
+  if(measure)return w;
+  let th=start;                             // linke Kante (Winkel); Zeilen sind linksbündig am selben Winkel
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';
+  parts.forEach(([ch,f,c,cw])=>{
+    const m=th-(cw/2)/r;th-=cw/r;
+    ctx.save();ctx.translate(cx+Math.cos(m)*r,cy+Math.sin(m)*r);ctx.rotate(m-Math.PI/2);
+    ctx.font=f;ctx.fillStyle=c;ctx.fillText(ch,0,0);ctx.restore();
+  });
+  ctx.textAlign='left';
+  return w;
+}
+const MFR=[   // ICAO-Typcode -> Hersteller (icon = Datei in assets/, sonst Schriftzug)
+  [/^(A[1-3]\d[\dNK]|A3\d\d|A22\d|A400|BCS\d)/,{name:'AIRBUS',icon:'airbus'}],
+  [/^B(7[0-9A-Z]{2}|3[789][0-9M])/,{name:'BOEING',icon:'boeing'}],
+  [/^(CRJ|CL\d|BD\d|GLEX|GL\d)/,{name:'BOMBARDIER',icon:'bombardier'}],
+  [/^E(\d{3}|75[LS]|55P|50P|35[LP])$/,{name:'EMBRAER'}],
+  [/^AT[4-7]\d/,{name:'ATR'}],
+  [/^DH8[A-D]|^DHC\d/,{name:'DE HAVILLAND'}],
+  [/^C(1[27]\d|2[0-1]\d|172|182|208|25[ABCM]|510|525|550|560|56X|680|68A|700|750)$/,{name:'CESSNA'}],
+  [/^PC\d+/,{name:'PILATUS'}],
+  [/^(F2TH|FA\d[0-9A-Z]|F900)/,{name:'DASSAULT'}],
+  [/^(GLF\d|G\d{3})/,{name:'GULFSTREAM'}],
+  [/^SF3/,{name:'SAAB'}]
+];
+const mfrOf=t=>{const m=MFR.find(([re])=>re.test(t||''));return m?m[1]:null;};
+const mfrImgs=new Map();
+function mfrImg(n){if(!mfrImgs.has(n)){const im=new Image();im.src='assets/'+n+'.svg';mfrImgs.set(n,im);}return mfrImgs.get(n);}
+// Alles Nötige für die Fluginfo geladen (Strecke, Logos)? Erst dann wird zu diesem Flug gewechselt -> kein Layout-Sprung
+function readyOf(p){
+  const rt=routeOf(p);if(rt===null)return false;
+  const iata=(rt&&rt.airline&&rt.airline.iata)||(CONFIG.source!=='live'?AL_IATA[(p.callsign||'').slice(0,3)]:'');
+  if(/^[A-Z0-9]{2}$/.test(iata||'')){logoOf(iata);if(logos.get(iata)===null)return false;}
+  const mf=mfrOf(p.type);if(mf&&mf.icon&&!mfrImg(mf.icon).complete)return false;
+  return true;
+}
+function drawInfo(sel){
+  if(!sel)return;
+  const o=S({x:0,y:0}),Rpx=R*pxkm,u=clamp(Rpx/16,13,24),F=(w,k)=>`${w} ${Math.round(u*k)}px system-ui`;
+  const rt=routeOf(sel)||{},al=rt.airline||{},og=rt.origin||{},ds=rt.dest||{};
+  const sh=t=>t.length>13?t.slice(0,12)+'…':t;
+  const hasRt=(og.iata||og.icao)&&(ds.iata||ds.icao);
+  const rows=[[[sel.callsign,F(600,1.45),'#fff']]];
+  if(hasRt)rows.push([[og.iata||og.icao,F(600,1),'#fff'],[og.city?' '+sh(og.city):'',F(400,.85),'#8a8a8a'],['   →   ',F(400,1),'#f5b932'],
+      [ds.iata||ds.icao,F(600,1),'#fff'],[ds.city?' '+sh(ds.city):'',F(400,.85),'#8a8a8a']]);
+  rows.push([[[sel.type,sel.reg].filter(Boolean).join('  ·  '),F(400,.85),'#8a8a8a']]);      // Typ (+ Registrierung) ganz unten
+  const step=u*1.9,r0=Rpx-u*1.0-(rows.length-1)*step;      // erste Zeile innen, letzte am Ring
+  const rc=r0+(rows.length-1)*step/2-u*.3;                   // Radius der Blockmitte
+  const lg=logoOf(al.iata||(CONFIG.source!=='live'?AL_IATA[(sel.callsign||'').slice(0,3)]:''));
+  const mf=mfrOf(sel.type),mi=mf&&mf.icon?mfrImg(mf.icon):null,hasR=!!mf;
+  const sz=2*step*.95,gap=u*.8;
+  const ws=rows.map((row,k)=>arcText(row,r0+k*step,0,true)/(r0+k*step));   // Winkelbreite je Zeile
+  const amax=Math.max(...ws);
+  const mid=Math.PI/2-((lg?1:0)-(hasR?1:0))*(sz+gap)/2/rc;     // Text mittig, Logos links/rechts symmetrisch
+  rows.forEach((row,k)=>arcText(row,r0+k*step,mid+ws[k]/2));
+  const tile=(th,draw,bg)=>{
+    ctx.save();ctx.translate(o.x+Math.cos(th)*rc,o.y+Math.sin(th)*rc);ctx.rotate(th-Math.PI/2);
+    ctx.beginPath();ctx.roundRect(-sz/2,-sz/2,sz,sz,sz*.16);ctx.fillStyle=bg;ctx.fill();
+    if(bg==='#000'){ctx.strokeStyle='#4a4a4a';ctx.lineWidth=1;ctx.stroke();}
+    ctx.clip();draw();ctx.restore();
+  };
+  const off=amax/2+(gap+sz/2)/rc;
+  const aL=lg?mid+off+(sz/2)/rc:mid+amax/2,aR=hasR?mid-off-(sz/2)/rc:mid-amax/2;
+  infoGap={c:(aL+aR)/2,half:(aL-aR)/2+.05};
+  if(lg)tile(mid+off,()=>ctx.drawImage(lg,-sz*.42,-sz*.42,sz*.84,sz*.84),'#fff');
+  if(hasR)tile(mid-off,()=>{
+    if(mi&&mi.complete&&mi.naturalWidth)ctx.drawImage(mi,-sz*.3,-sz*.3,sz*.6,sz*.6);
+    else if(!mi){ctx.fillStyle='#111';ctx.textAlign='center';ctx.textBaseline='middle';
+      let fs=sz*.2;ctx.font=`700 ${fs}px system-ui`;const tw=ctx.measureText(mf.name).width;
+      if(tw>sz*.84){fs*=sz*.84/tw;ctx.font=`700 ${fs}px system-ui`;}
+      ctx.fillText(mf.name,0,0);}
+  },'#fff');
+}
+function updateUI(){
+  const vis=visible();
+  if(!vis.find(p=>p.id===selId)&&vis.length)selId=vis[0].id;
+}
+cv.addEventListener('click',e=>{
+  const r=cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;let best=null,bd=40;
+  planes.forEach(p=>{const s=S(p),d=Math.hypot(s.x-mx,s.y-my);if(d<bd){bd=d;best=p}});
+  if(best&&best.mode!=='park'){selId=best.id;lastSel=performance.now();updateUI();}
+});
+function tickClock(){$('clock').textContent=new Date().toLocaleTimeString('de-CH',{hour12:false})}
+
+/* ---------- Loop ---------- */
+let last=performance.now(),uiAcc=0;
+const live=new Map();
+function setSrc(txt,ok){const e=$('src');e.textContent=txt;e.classList.toggle('ok',!!ok);}
+let liveTimer=null,airportGen=0,liveFails=0,ghosts=[],clockOff=null;
+const DELAY=5500;         // Anzeige läuft ~5,5 s hinter der Echtzeit: so liegt sie immer zwischen zwei bekannten Meldungen -> keine Sprünge
+async function liveLoop(){
+  clearTimeout(liveTimer);
+  if(CONFIG.source!=='live')return;
+  const gen=airportGen;
+  try{
+    const c=CONFIG.center;
+    const r=await fetch(`/api/aircraft?lat=${c.lat}&lon=${c.lon}&r=${CONFIG.fetchNm}`,{cache:'no-store',signal:AbortSignal.timeout(10000)});
+    if(!r.ok)throw new Error(r.status);
+    const j=await r.json(),now=performance.now(),seen=new Set();
+    const nowMs=j.now?(j.now>1e12?j.now:j.now*1000):Date.now();        // Zeitstempel der Datenquelle
+    const off=now-nowMs;clockOff=clockOff==null?off:Math.min(off,clockOff+50);    // Uhr der Quelle -> Uhr des Browsers (frischeste Antwort zählt)
+    if(gen!==airportGen)return;                     // Flughafen wurde inzwischen gewechselt
+    (j.ac||j.aircraft||[]).forEach(a=>{
+      if(a.lat==null||a.lon==null)return;
+      if(/^C/.test(a.category||'')||/^(GND|EMER|TWR)$/.test(a.t||''))return;      // Bodenfahrzeuge (Follow-me, Feuerwehr, ...) sind keine Flugzeuge
+      const hex=String(a.hex||''),id=parseInt(hex.replace('~',''),16);if(!id)return;
+      seen.add(id);
+      const ground=a.alt_baro==='ground',alt=ground?0:(+a.alt_baro||0),vs=a.baro_rate||0,q=latlonToKm(a.lat,a.lon);
+      const p=live.get(id)||{id,trail:[],tAcc:0,airline:'',from:'',to:'',kind:'ovr',hdg:0};
+      if(!ground)p.kind=(vs<-300&&alt<8000)?'arr':(vs>300&&alt<12000)?'dep':'ovr';
+      else if(p.kind==='ovr')p.kind='dep';
+      Object.assign(p,{callsign:(String(a.flight||'').replace(/[^A-Za-z0-9]/g,'')||a.r||hex).toUpperCase(),type:a.t||'—',reg:a.r||'',x:p.x??q.x,y:p.y??q.y,
+        alt,spd:a.gs||0,hdg:a.track??a.true_heading??p.hdg,vs,
+        mode:ground?((a.gs||0)>3?'taxi':'park'):'air',after:p.kind==='arr'?'park':'takeoff'});
+      const tObs=nowMs-(+a.seen_pos||0)*1000+clockOff,S=p.S=p.S||[],L=S[S.length-1];     // Beobachtungszeit dieser Position
+      if(!L||tObs>L.t+1){S.push({t:tObs,x:q.x,y:q.y,h:p.hdg,v:a.gs||0});if(S.length>8)S.shift();}
+      live.set(id,p);
+    });
+    live.forEach((p,id)=>{if(!seen.has(id)){if(p.trail.length>1)ghosts.push(p.trail);live.delete(id);}});
+    planes=[...live.values()];
+    liveFails=0;
+    setSrc('LIVE · '+(r.headers.get('X-Source')||''),true);
+  }catch(e){
+    if(gen===airportGen){
+      if(++liveFails>=10){live.clear();planes=[];}          // länger als ~30 s keine Daten: keine veralteten Flugzeuge zeigen
+      setSrc('OFFLINE – Server/Internet?',false);
+    }
+  }
+  if(gen===airportGen)liveTimer=setTimeout(liveLoop,2000);
+}
+function extrapolate(now){            // Position zwischen den bekannten Meldungen gleichmäßig berechnen (Verzögerung DELAY)
+  const td=now-DELAY,lerpA=(a,b,u)=>(a+(((b-a+540)%360)-180)*u+360)%360;
+  planes.forEach(p=>{
+    const S=p.S;if(!S||!S.length)return;
+    const F=S[0],L=S[S.length-1];let tx,ty,th;
+    if(td>=L.t){const dt=Math.min(6,(td-L.t)/1000),d=vec(L.h);tx=L.x+d.x*L.v*KT*dt;ty=L.y+d.y*L.v*KT*dt;th=L.h;}
+    else if(td<=F.t){const dt=Math.min(8,(F.t-td)/1000),d=vec(F.h);tx=F.x-d.x*F.v*KT*dt;ty=F.y-d.y*F.v*KT*dt;th=F.h;}
+    else{
+      let i=0;while(i<S.length-2&&S[i+1].t<=td)i++;
+      const a=S[i],b=S[i+1],u=(td-a.t)/(b.t-a.t);
+      tx=a.x+(b.x-a.x)*u;ty=a.y+(b.y-a.y)*u;th=lerpA(a.h,b.h,u);
+    }
+    const fr=Math.min(.1,(now-(p.tf||now))/1000);
+    if(!p.shown){p.x=tx;p.y=ty;p.hd=th;}
+    else{const f=1-Math.exp(-4*fr);p.x+=(tx-p.x)*f;p.y+=(ty-p.y)*f;p.hd=lerpA(p.hd,th,f);}      // Rest-Unruhe wird zusätzlich geglättet
+    p.tf=now;p.shown=true;p.dist=Math.hypot(p.x,p.y);
+  });
+}
+function frame(now){
+  try{frameBody(now);}catch(e){console.error(e);}
+  requestAnimationFrame(frame);
+}
+function frameBody(now){
+  const dt=Math.min(0.1,(now-last)/1000);last=now;
+  if(CONFIG.source==='sim'){
+    simStep(dt*CONFIG.warp);
+  }
+  if(CONFIG.source==='live')extrapolate(now);
+  updateTrails(now);
+  if(W<2||H<2){resize();return;}
+  if(!stat)renderStatic();
+  ctx.drawImage(stat,0,0,W,H);
+  const order={park:0,taxi:1,air:2};
+  ghosts.forEach(g=>drawTrail(g,null,now));
+  // Auswahl blendet aus -> wechselt -> blendet wieder ein
+  const vis=visible();let shown=vis.find(p=>p.id===dispId);
+  if(shown)lastShown=shown;else if(dispId!==selId&&dispA>0)shown=lastShown;      // nur zum Ausblenden
+  if(dispId!==selId){
+    if(shown&&dispA>0)dispA=Math.max(0,dispA-dt/.4);
+    else{                                       // ausgeblendet: warten, bis der nächste Flug komplett geladen ist (max. 3 s)
+      dispA=0;const nx=vis.find(p=>p.id===selId);if(!waitT)waitT=now;
+      if(!nx||readyOf(nx)||now-waitT>3000){dispId=selId;waitT=0;}
+    }
+  }else dispA=Math.min(1,dispA+dt/.5);
+  planes.filter(p=>p.id!==dispId).sort((a,b)=>order[a.mode]-order[b.mode]).forEach(p=>drawPlane(p,false));
+  const sp=planes.find(p=>p.id===dispId);if(sp)drawPlane(sp,true);
+  ctx.globalAlpha=dispA;drawInfo(shown);ctx.globalAlpha=1;
+  {const gh=shown?infoGap.half*dispA:0,o=S({x:0,y:0});          // Ring (R-1) mit Lücke hinter der Fluginfo
+    ctx.strokeStyle='#1d1d1d';ctx.lineWidth=1;ctx.beginPath();
+    if(gh<.001)ctx.arc(o.x,o.y,(R-1)*pxkm,0,7);else ctx.arc(o.x,o.y,(R-1)*pxkm,infoGap.c+gh,infoGap.c-gh+Math.PI*2);
+    ctx.stroke();}
+  uiAcc+=dt;if(uiAcc>.25){uiAcc=0;updateUI();tickClock();}
+  if(now-lastSel>(CONFIG.autoSelectSec-3)*1000){            // nächsten Flug schon vorher laden
+    const v=visible(),i=v.findIndex(p=>p.id===selId);if(v.length)readyOf(v[(i+1)%v.length]);
+  }
+  if(now-lastSel>CONFIG.autoSelectSec*1000){
+    const v=visible();if(v.length){const i=v.findIndex(p=>p.id===selId);selId=v[(i+1)%v.length].id;}
+    lastSel=now;
+  }
+}
+/* ---------- Flughafen wechseln (ICAO/IATA) ---------- */
+// Anzeige-Radius: 5 km, bei Bedarf größer, damit Pisten/Terminals/Vorfelder nicht in den Streifen der Fluginfo (unten) ragen
+function pickRadius(d){
+  // nur Teile des eigentlichen Flughafens (nächster Punkt < 4,5 km); entfernte Flächen (z. B. Werksvorfeld) zählen nicht
+  const feats=[...d.runway.filter(w=>!w.r.startsWith('H')),...d.terminal,...d.apron].filter(w=>Math.min(...w.p.map(q=>Math.hypot(q[0],q[1])))<4.5);
+  const pts=feats.flatMap(w=>w.p);
+  for(const k of [5,6]){
+    const lim=.66*k;
+    if(!pts.some(([x,y])=>{const dd=Math.hypot(x,y);return dd>lim&&-y/dd>.47;}))return k;
+  }
+  return 5;          // passt auch bei 6 km nicht: bei 5 km bleiben (kleine Überlappung statt winzigem Flughafen)
+}
+function applyAirport(d){
+  A=d;airportGen++;R=CONFIG.viewKm=pickRadius(d);
+  CONFIG.center={lat:d.lat,lon:d.lon};
+  $('aptName').textContent=(d.name||d.icao).replace(/ (International |Intl\.? )?Airport$/i,'').toUpperCase();
+  $('aptCodes').textContent=d.icao+(d.iata?' · '+d.iata:'');
+  document.title=d.icao+' – Airport Radar Display';
+  setupRunways();buildGraph();
+  live.clear();planes=[];ghosts=[];selId=null;clockOff=null;
+  if(CONFIG.source==='sim')simInit();else{setSrc('LIVE …',false);liveLoop();}
+  resize();
+}
+function aptMsg(t){$('apt-msg').textContent=t||'';}
+async function loadAirport(code){
+  code=code.trim().toUpperCase();if(!code)return;
+  const inp=$('icao');inp.classList.remove('err');inp.classList.add('busy');inp.disabled=true;aptMsg('Lade '+code+' …');
+  try{
+    let d;
+    if(code==='LSZH'||code==='ZRH')d=LSZH_DEFAULT;
+    else{
+      const r=await fetch('/api/airport?icao='+encodeURIComponent(code),{signal:AbortSignal.timeout(90000)}),j=await r.json();
+      if(!r.ok)throw new Error(j.error||('Fehler '+r.status));d=j;
+    }
+    applyAirport(d);inp.value=d.icao;aptMsg('');inp.blur();
+  }catch(e){
+    inp.classList.add('err');aptMsg(e.name==='TimeoutError'?'Zeitüberschreitung – später nochmal versuchen':e.message==='Failed to fetch'?'Server nicht erreichbar (python server.py läuft?)':e.message);
+    setTimeout(()=>{inp.classList.remove('err');aptMsg('');},4000);
+  }
+  inp.classList.remove('busy');inp.disabled=false;
+}
+$('icaoForm').addEventListener('submit',e=>{e.preventDefault();loadAirport($('icao').value);});
+$('icao').addEventListener('focus',e=>e.target.select());
+
+applyAirport(LSZH_DEFAULT);
+$('icao').value='LSZH';
+requestAnimationFrame(frame);
+// Start-Flughafen: ?icao=... in der URL, sonst START_ICAO vom Server (.env); gilt bei jedem Neuladen der Seite
+(async()=>{
+  let code='LSZH';
+  try{code=new URLSearchParams(location.search).get('icao')||(await (await fetch('/api/config',{cache:'no-store'})).json()).icao||'LSZH';}catch(e){}
+  if(code.toUpperCase()!=='LSZH'&&code.toUpperCase()!=='ZRH')loadAirport(code);
+})();
+</script>
+</body>
+</html>

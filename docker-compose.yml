@@ -1,0 +1,16 @@
+services:
+  fr-display:
+    build: .
+    container_name: fr-display
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8765}:${PORT:-8765}"
+    environment:
+      PORT: "${PORT:-8765}"
+      START_ICAO: "${START_ICAO:-LSZH}"
+      TZ: "${TZ:-Europe/Zurich}"
+    volumes:
+      - fr-display-cache:/app/cache
+
+volumes:
+  fr-display-cache:
